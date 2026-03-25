@@ -13,6 +13,7 @@ import datetime
 import glob
 import json
 import argparse
+import tomllib
 
 colors = [
     '#72AB97',
@@ -35,7 +36,6 @@ def get_columns(index):
 
 def load_log(path):
     glob_path = f'{path}/log-*.log'
-
     try:
         log_path = glob.glob(glob_path)[0]
     except IndexError as e:
@@ -77,7 +77,8 @@ def load_file(path, config):
 
         job = data['jobs'][0]
         options = job['job options']
-
+        
+        
         if options['bs'].endswith('m'):
             bs = int(options['bs'].rstrip('m')) * 1024 * 1024
         elif options['bs'].endswith('k'):
@@ -85,6 +86,7 @@ def load_file(path, config):
         else:
             bs = int(options['bs'])
 
+        bs = format_bs(bs, 'bs')
         qd = int(options['iodepth'])
         iops = int(data["jobs"][0]["read"]["iops"]) + int(data["jobs"][0]["write"]["iops"])
         jobcount = int(options['numjobs'])
@@ -102,13 +104,14 @@ def load_file(path, config):
             'timestamp': timestamp,
         }, index=[0])
         frame = pd.concat([frame, new], ignore_index=True)
+    print(frame)
     return frame
 
 def append_single(frame, path, config):
     frame = pd.concat([frame, load_file(path, config)], ignore_index=True)
     return frame
 
-def calculate_difference(frame, a, b):
+def calculate_difference(frame, a, b, data_conf):
     group = frame\
         .groupby(indexes())['iops']
 
@@ -118,6 +121,12 @@ def calculate_difference(frame, a, b):
         "variance": group.var(),
         "stddev": group.std(),
     }).reset_index().pivot(index=indexes_no_config(), columns=['config']).sort_index(level=['qd'])
+
+    # Only keeping data specified in config.
+    stat = stat[stat.index.get_level_values('qd').isin(data_conf['qd'])]
+    stat = stat[stat.index.get_level_values('bs').isin(data_conf['bs'])]
+    stat = stat[stat.index.get_level_values('workload').isin(data_conf['workload'])]
+    stat = stat[stat.index.get_level_values('jobcount').isin(data_conf['jobcount'])]
 
     confidence = 95
     tval = stat['samples'][a].map(lambda x: np.abs(sp.stats.t.ppf((100-confidence) / 200, x)))
@@ -144,7 +153,6 @@ def calculate_difference(frame, a, b):
         f'{a}_samples': stat['samples'][a],
         f'{b}_samples': stat['samples'][b],
     })
-
     return result
 
 def generate_query_string(query):
@@ -155,9 +163,16 @@ def generate_query_string(query):
     query = ' and '.join(query_components)
     return query
 
-def format_bs(bs):
-    (bs,unit) = convert_units(bs)
-    return f'{bs:.0f} {unit}'
+def format_bs(bs, kind):
+    if kind == 'bs':
+        # This is scuffed
+        bs = parse_size(str(bs))        
+        (bs,unit) = convert_units(bs)
+        return f'{bs:.0f}{unit}'
+    else:
+        return bs
+    
+
 
 def plot(axes, result, field, query, index):
     data = result[[field, f"{field}_interval"]]\
@@ -165,10 +180,13 @@ def plot(axes, result, field, query, index):
         .query(generate_query_string(query))\
         .pivot(index=[index], columns=get_columns(index))
 
+    # Sorts the subplot xaxis, important because block sizes have units.
+    # Fails if subplot xaxis is workload.
+    data = data.sort_index(key=lambda idx: idx.map(parse_size))
+
     ax = data[field]\
         .plot.bar(ax=axes, yerr=data[f"{field}_interval"], capsize=1.5, error_kw={'elinewidth':0.5}, edgecolor='black', lw=0.5, color=colors)
-
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x) for x in data.index]))
+    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x, index) for x in data.index]))
     ax.axhline(0, color='black', lw=0.5, label='_nolegend_')
     #ax.set_title(f"qd {qd}, {workload}")
     #ax.set_xlabel(f"Queue Depth {qd}")
@@ -212,8 +230,6 @@ def plot_throughput(axes, frame, base, new):
             bar.set_hatch(hatch)
 
     ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x) for x in data.index]))
-
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x) for x in data.index]))
     ax.axhline(0, color='black', lw=0.5, label='_nolegend_')
     ax.set_xlabel("")
     ax.legend().remove()
@@ -223,30 +239,66 @@ def plot_throughput(axes, frame, base, new):
     ax.xaxis.grid(True, which='both')
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-def plot_rnull(frame, field, base = None, new = None, title = 'Comparison'):
-    result = calculate_difference(frame, new, base)
+def map_config_axis_names(config):
+    mapping = { 'jobcounts': 'jobcount', 'queue_depths': 'qd', 'block_sizes': 'bs', 'workloads': 'workload' }
+    return mapping[config]
 
-    fig, axes = plt.subplots(2, 4, sharey=True, sharex=True, figsize=(13,6))
+def axis_name_mapping(config_item):
+    return {
+        'block_sizes': 'Block Sizes',
+        'queue_depths': 'qd',
+        'jobcounts': 'Threads (cores)',
+        'workloads': '',
+        }[config_item]
+
+# This gets send to 'calculate_difference' to remove data points that is _not_ specified in
+# the configuration.
+def build_plot_dict(config):
+    return {
+            map_config_axis_names(config['plot_gridy']): config[config['plot_gridy']],
+            map_config_axis_names(config['plot_gridx']): config[config['plot_gridx']],
+            map_config_axis_names(config['subplotx']): config[config['subplotx']],
+            map_config_axis_names(config['barcluster']): config[config['barcluster']]
+           }
+
+def parse_size(s):
+    if s.endswith("KiB"):
+        return int(s[:-3]) * 1024
+    elif s.endswith("MiB"):
+        return int(s[:-3]) * 1024 * 1024
+    elif s.endswith("B"):
+        return int(s[:-1])
+    else:
+        return int(s)
+
+def plot_rnull(frame, field, config, base = None, new = None, title = 'Comparison'):
+    axis_conf = build_plot_dict(config)    
+    result = calculate_difference(frame, new, base, axis_conf)
+
+    plotgridy = config[config['plot_gridy']]
+    plotgridx = config[config['plot_gridx']]
+    subplotx = config[config['subplotx']]
+    barcluster = config[config['barcluster']]
+    
+    fig, axes = plt.subplots(len(plotgridy), len(plotgridx), sharey=True, sharex=True, figsize=(13,6), squeeze=False)
     fig.suptitle(title)
+    print(config)
+    for i, pgy in enumerate(plotgridy):
+        for j, pgx in enumerate(plotgridx):
+            gy, gx, sp = map_config_axis_names(config['plot_gridy']), map_config_axis_names(config['plot_gridx']), map_config_axis_names(config['subplotx'])
+            plot(axes[i][j], result, field, {gy: pgy, gx: pgx}, sp)
+            
+    plotgridy_axis_name = axis_name_mapping(config['plot_gridy'])
+    for i, pgy in enumerate(plotgridy):
+        axes[i][0].set_ylabel(f"{plotgridy_axis_name} {pgy}")
 
-    plot(axes[0][0], result, field, {'workload':  'randread', 'qd':   1}, 'bs')
-    plot(axes[0][1], result, field, {'workload':  'randread', 'qd':   8}, 'bs')
-    plot(axes[0][2], result, field, {'workload':  'randread', 'qd':  32}, 'bs')
-    plot(axes[0][3], result, field, {'workload':  'randread', 'qd': 128}, 'bs')
-    plot(axes[1][0], result, field, {'workload': 'randwrite', 'qd':   1}, 'bs')
-    plot(axes[1][1], result, field, {'workload': 'randwrite', 'qd':   8}, 'bs')
-    plot(axes[1][2], result, field, {'workload': 'randwrite', 'qd':  32}, 'bs')
-    plot(axes[1][3], result, field, {'workload': 'randwrite', 'qd': 128}, 'bs')
-
-    axes[0][0].set_ylabel("randread")
-    axes[1][0].set_ylabel("randwrite")
-    axes[0][0].set_title("qd 1")
-    axes[0][1].set_title("qd 8")
-    axes[0][2].set_title("qd 32")
-    axes[0][3].set_title("qd 128")
+    plotgridx_axis_name = axis_name_mapping(config['plot_gridx'])
+    for j, pgx in enumerate(plotgridx):
+        axes[0][j].set_title(f"{plotgridx_axis_name} {pgx}")
+    
     fig.text(0.01, 0.5, 'IO/s Difference Relative', va='center', rotation='vertical')
-    fig.text(0.5, 0.01, 'Block Size (KiB)', ha='center')
-    fig.legend(['1', '2', '6'], loc='lower left', ncols=3, title='Threads (cores)', bbox_to_anchor=(0.03,0.85))
+    fig.text(0.5, 0.01, axis_name_mapping(config['subplotx']), ha='center')
+    fig.legend(barcluster, loc='lower left', ncols=3, title=axis_name_mapping(config['barcluster']), bbox_to_anchor=(0.03,0.85))    
     fig.tight_layout(pad=1)
     plt.subplots_adjust(left=0.08, top=0.8)
 
@@ -254,19 +306,31 @@ def plot_rnull(frame, field, base = None, new = None, title = 'Comparison'):
     print("Samples {}: {:.3}".format(base, result[f'{base}_samples'].mean()))
     print("Samples {}: {:.3}".format(new, result[f'{new}_samples'].mean()))
 
-def violin(ax, frame, base, new, workload, qd):
-    blocksizes = [4096, 32768, 262144, 1048576, 16777216]
-    jobcounts = [1, 2, 6]
-    positions = [1,2,3, 5,6,7, 9,10,11, 13,14,15, 17,18,19]
-    query = {'workload':  workload, 'qd': qd, 'config': base}
+def violin(ax, frame, base, new, workload, config):
+    # TODO:
+    # Fix labels
+    axis_conf = {
+        'plot_gridy': config[config['plot_gridy']],
+        'plot_gridx': config[config['plot_gridx']],
+        'subplotx': config[config['subplotx']],
+        'barcluster': config[config['barcluster']]
+    } 
+    pgx, pgy, sp, bc = axis_conf['plot_gridx'], axis_conf['plot_gridy'], axis_conf['subplotx'], axis_conf['barcluster']
+
+    # This must be generated by 1..len('barcluster'), 1+len('barcluster')..
+    # repeated len('subplotx') times
+    vlines = [(i + 1) * (len(bc) + 1) for i in range(len(sp)-1)]
+    positions = [i * (len(bc) + 1) + j + 1 for i in range(len(sp)) for j in range(len(bc))] 
+    
+    query = {map_config_axis_names(config['plot_gridy']):  pgy, map_config_axis_names(config['plot_gridx']): pgx, 'config': base}
     frame_c = frame.query(generate_query_string(query))
-    query = {'workload':  workload, 'qd': qd, 'config': new}
+    query = {map_config_axis_names(config['plot_gridy']):  pgy, map_config_axis_names(config['plot_gridx']): pgx, 'config': new}
     frame_r = frame.query(generate_query_string(query))
     data_c = list()
     data_r = list()
-    for bs in blocksizes:
-        for jc in jobcounts:
-            query = {'bs': bs, 'jobcount': jc}
+    for sbx in sp:
+        for bcs in bc:
+            query = {map_config_axis_names(config['subplotx']): sbx, map_config_axis_names(config['barcluster']): bcs}
             col_c = frame_c.query(generate_query_string(query))['iops']
             col_r = frame_r.query(generate_query_string(query))['iops']
             mean = col_c.mean()
@@ -298,10 +362,10 @@ def violin(ax, frame, base, new, workload, qd):
     parts_r['cmaxes'].set_linewidth(0.5)
     parts_r['cmins'].set_linewidth(0.5)
 
-    ax.vlines([4,8,12,16], 0, 1,  transform=ax.get_xaxis_transform())
+    ax.vlines(vlines, 0, 1,  transform=ax.get_xaxis_transform())
 
     ax.xaxis.set_major_locator(ticker.FixedLocator([2,6,10,14,18]))
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x) for x in blocksizes]))
+    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x, map_config_axis_names(config['subplotx'])) for x in sp]))
     ax.set_xlabel("")
     ax.set_axisbelow(True)
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
@@ -309,30 +373,41 @@ def violin(ax, frame, base, new, workload, qd):
     #ax.xaxis.grid(True, which='both')
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-def plot_null_violin(frame, base = None, new = None, title = 'Normalized Density'):
-    fig, axes = plt.subplots(2, 4, sharey=True, sharex=True, figsize=(13,6))
+def plot_null_violin(frame, config, base = None, new = None, title = 'Normalized Density'):
+    axis_conf = {
+        'plot_gridy': config[config['plot_gridy']],
+        'plot_gridx': config[config['plot_gridx']],
+        'subplotx': config[config['subplotx']],
+        'barcluster': config[config['barcluster']]
+    }    
+
+    plotgridy = config[config['plot_gridy']]
+    plotgridx = config[config['plot_gridx']]
+    subplotx = config[config['subplotx']]
+    barcluster = config[config['barcluster']]
+    
+    fig, axes = plt.subplots(len(plotgridy), len(plotgridx), sharey=True, sharex=True, figsize=(13,6), squeeze=False)
     fig.suptitle(title)
 
-    violin(axes[0][0], frame, base, new, 'randread', 1)
-    violin(axes[0][1], frame, base, new, 'randread', 8)
-    violin(axes[0][2], frame, base, new, 'randread', 32)
-    violin(axes[0][3], frame, base, new, 'randread', 128)
-    violin(axes[1][0], frame, base, new, 'randwrite', 1)
-    violin(axes[1][1], frame, base, new, 'randwrite', 8)
-    violin(axes[1][2], frame, base, new, 'randwrite', 32)
-    violin(axes[1][3], frame, base, new, 'randwrite', 128)
+    for i, pgy in enumerate(plotgridy):
+        for j, pgx in enumerate(plotgridx):
+            gy, gx, sp = map_config_axis_names(config['plot_gridy']), map_config_axis_names(config['plot_gridx']), map_config_axis_names(config['subplotx'])
+            violin(axes[i][j], frame, base, new, config['plot_gridy'], config)
+            
 
-    axes[0][0].set_ylabel("randread")
-    axes[1][0].set_ylabel("randwrite")
-    axes[0][0].set_title("qd 1")
-    axes[0][1].set_title("qd 8")
-    axes[0][2].set_title("qd 32")
-    axes[0][3].set_title("qd 128")
-    fig.text(0.01, 0.5, 'IO/s Relative', va='center', rotation='vertical')
-    fig.text(0.5, 0.01, 'Block Size (KiB)', ha='center')
-    fig.legend(['1', '2', '6'], loc='lower left', ncols=3, title='Threads (cores)', bbox_to_anchor=(0.03,0.85))
-    fig.tight_layout(pad=1)
-    plt.subplots_adjust(left=0.08, top=0.8)
+    
+
+    plotgridy_axis_name = axis_name_mapping(config['plot_gridy'])
+    for i, pgy in enumerate(plotgridy):
+        axes[i][0].set_ylabel(f"{plotgridy_axis_name} {pgy}")
+
+    plotgridx_axis_name = axis_name_mapping(config['plot_gridx'])
+    for j, pgx in enumerate(plotgridx):
+        axes[0][j].set_title(f"{plotgridx_axis_name} {pgx}")
+        
+    fig.text(0.01, 0.5, 'IO/s Difference Relative', va='center', rotation='vertical')
+    fig.text(0.5, 0.01, axis_name_mapping(config['subplotx']), ha='center')
+    fig.legend(barcluster, loc='lower left', ncols=3, title=axis_name_mapping(config['barcluster']), bbox_to_anchor=(0.03,0.85)) 
 
 def plot_nvme_relative(frame, field, base = None, new = None, title = 'Comparison'):
     result = calculate_difference(frame, new, base)
@@ -359,27 +434,27 @@ def plot_nvme_absolute(frame, base=None, new=None):
     axes.set_xlabel("Block size")
     plt.subplots_adjust(bottom=0.2)
 
-def nvme_quick(version):
+def nvme_quick(version, path_a, path_b, name_a, name_b, out_path, out_name):
     frame = pd.DataFrame()
-    frame = append_single(frame, f'data-rnvme-{version}', 'rust')
-    frame = append_single(frame, f'data-rnvme-{version}', 'c')
-
+    frame = append_single(frame, path_a, 'rust')
+    frame = append_single(frame, path_b, 'c')
+    
     plot_nvme_relative(frame, 'relative_diff', 'c', 'rust', r"NVMe randread, $\frac{R-C}{C}$ (Bare Metal, 1 core)")
     #plt.show()
-    plt.savefig(f"nvme-{version}-relative.svg")
+    plt.savefig(f'{out_path}/{out_name}-relative.svg')
 
     plot_nvme_absolute(frame, base='c', new='rust')
     #plt.show()
-    plt.savefig(f"nvme-{version}-absolute.svg")
+    plt.savefig(f'{out_path}/{out_name}.svg-absolute.svg')
 
-def null_cli(path_a, path_b, name_a, name_b, out_path, out_name):
+def null_cli(path_a, path_b, name_a, name_b, out_path, out_name, config):
     frame = pd.DataFrame()
     frame = append_single(frame, path_a, name_a)
     frame = append_single(frame, path_b, name_b)
 
-    plot_rnull(frame, 'relative_diff',  base = name_a, new=name_b, title=r"Null Blk Throughput, $\frac{B-A}{A}$ (Bare Metal)")
+    plot_rnull(frame, 'relative_diff', config, base = name_a, new=name_b, title=r"Throughput (Bare Metal)")
     plt.savefig(f'{out_path}/{out_name}.svg')
-    plot_null_violin(frame, name_a, name_b)
+    plot_null_violin(frame, config, name_a, name_b)
     plt.savefig(f'{out_path}/{out_name}-density.svg')
 
 def main():
@@ -390,9 +465,12 @@ def main():
     parser.add_argument("--name-b", default="b")
     parser.add_argument("--out-path", default=".")
     parser.add_argument("--out-name", default="plot")
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    null_cli(args.path_a, args.path_b, args.name_a, args.name_b, args.out_path, args.out_name)
-
+    conf = tomllib.load(open(args.config, "rb"))
+     
+    null_cli(args.path_a, args.path_b, args.name_a, args.name_b, args.out_path, args.out_name, conf)
+       
 if __name__ == "__main__":
     main()
