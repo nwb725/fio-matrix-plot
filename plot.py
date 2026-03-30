@@ -104,7 +104,6 @@ def load_file(path, config):
             'timestamp': timestamp,
         }, index=[0])
         frame = pd.concat([frame, new], ignore_index=True)
-    print(frame)
     return frame
 
 def append_single(frame, path, config):
@@ -182,7 +181,8 @@ def plot(axes, result, field, query, index):
 
     # Sorts the subplot xaxis, important because block sizes have units.
     # Fails if subplot xaxis is workload.
-    data = data.sort_index(key=lambda idx: idx.map(parse_size))
+    if index != 'workload':
+        data = data.sort_index(key=lambda idx: idx.map(parse_size))
 
     ax = data[field]\
         .plot.bar(ax=axes, yerr=data[f"{field}_interval"], capsize=1.5, error_kw={'elinewidth':0.5}, edgecolor='black', lw=0.5, color=colors)
@@ -282,7 +282,6 @@ def plot_rnull(frame, field, config, base = None, new = None, title = 'Compariso
     
     fig, axes = plt.subplots(len(plotgridy), len(plotgridx), sharey=True, sharex=True, figsize=(13,6), squeeze=False)
     fig.suptitle(title)
-    print(config)
     for i, pgy in enumerate(plotgridy):
         for j, pgx in enumerate(plotgridx):
             gy, gx, sp = map_config_axis_names(config['plot_gridy']), map_config_axis_names(config['plot_gridx']), map_config_axis_names(config['subplotx'])
@@ -307,8 +306,6 @@ def plot_rnull(frame, field, config, base = None, new = None, title = 'Compariso
     print("Samples {}: {:.3}".format(new, result[f'{new}_samples'].mean()))
 
 def violin(ax, frame, base, new, workload, config):
-    # TODO:
-    # Fix labels
     axis_conf = {
         'plot_gridy': config[config['plot_gridy']],
         'plot_gridx': config[config['plot_gridx']],
@@ -409,43 +406,6 @@ def plot_null_violin(frame, config, base = None, new = None, title = 'Normalized
     fig.text(0.5, 0.01, axis_name_mapping(config['subplotx']), ha='center')
     fig.legend(barcluster, loc='lower left', ncols=3, title=axis_name_mapping(config['barcluster']), bbox_to_anchor=(0.03,0.85)) 
 
-def plot_nvme_relative(frame, field, base = None, new = None, title = 'Comparison'):
-    result = calculate_difference(frame, new, base)
-    fig,axes = plt.subplots(figsize=(6,5))
-    fig.suptitle(title)
-    plot(axes, result, field, {'workload': 'randread', 'jobcount': 1}, 'bs')
-
-    axes.set_ylabel('Relative difference')
-    axes.set_xlabel('Block size')
-    fig.legend(['1', '8', '32', '128'], title = 'Queue depth')
-
-    plt.subplots_adjust(bottom=0.2)
-
-    print("Mean of difference: {:.3}".format(result[field].mean()))
-    print("Samples {}: {:.3}".format(base, result[f'{base}_samples'].mean()))
-    print("Samples {}: {:.3}".format(new, result[f'{new}_samples'].mean()))
-
-def plot_nvme_absolute(frame, base=None, new=None):
-    fig,axes = plt.subplots(figsize=(8,5))
-    plot_throughput(axes, frame, base, new)
-    axes.legend(['C, 1', 'Rust, 1', 'C, 8', 'Rust, 8', 'C, 32', 'Rust, 32', 'C, 128', 'Rust, 128'], title="Configuration (lang, QD)")
-    axes.set_title("Random read throughput (Bare Metal, 1 core)")
-    axes.set_ylabel("IO/s")
-    axes.set_xlabel("Block size")
-    plt.subplots_adjust(bottom=0.2)
-
-def nvme_quick(version, path_a, path_b, name_a, name_b, out_path, out_name):
-    frame = pd.DataFrame()
-    frame = append_single(frame, path_a, 'rust')
-    frame = append_single(frame, path_b, 'c')
-    
-    plot_nvme_relative(frame, 'relative_diff', 'c', 'rust', r"NVMe randread, $\frac{R-C}{C}$ (Bare Metal, 1 core)")
-    #plt.show()
-    plt.savefig(f'{out_path}/{out_name}-relative.svg')
-
-    plot_nvme_absolute(frame, base='c', new='rust')
-    #plt.show()
-    plt.savefig(f'{out_path}/{out_name}.svg-absolute.svg')
 
 def null_cli(path_a, path_b, name_a, name_b, out_path, out_name, config):
     frame = pd.DataFrame()
