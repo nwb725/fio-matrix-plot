@@ -86,7 +86,7 @@ def load_file(path, config):
         else:
             bs = int(options['bs'])
 
-        bs = format_bs(bs, 'bs')
+        bs = format_label(bs, 'bs')
         qd = int(options['iodepth'])
         iops = int(data["jobs"][0]["read"]["iops"]) + int(data["jobs"][0]["write"]["iops"])
         jobcount = int(options['numjobs'])
@@ -162,14 +162,14 @@ def generate_query_string(query):
     query = ' and '.join(query_components)
     return query
 
-def format_bs(bs, kind):
+def format_label(val, kind):
     if kind == 'bs':
         # This is scuffed
-        bs = parse_size(str(bs))        
+        bs = parse_size(str(val))        
         (bs,unit) = convert_units(bs)
         return f'{bs:.0f}{unit}'
     else:
-        return bs
+        return val
     
 
 
@@ -186,7 +186,7 @@ def plot(axes, result, field, query, index):
 
     ax = data[field]\
         .plot.bar(ax=axes, yerr=data[f"{field}_interval"], capsize=1.5, error_kw={'elinewidth':0.5}, edgecolor='black', lw=0.5, color=colors)
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x, index) for x in data.index]))
+    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_label(x, index) for x in data.index]))
     ax.axhline(0, color='black', lw=0.5, label='_nolegend_')
     #ax.set_title(f"qd {qd}, {workload}")
     #ax.set_xlabel(f"Queue Depth {qd}")
@@ -229,7 +229,7 @@ def plot_throughput(axes, frame, base, new):
         if hatch != None:
             bar.set_hatch(hatch)
 
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x) for x in data.index]))
+    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_label(x) for x in data.index]))
     ax.axhline(0, color='black', lw=0.5, label='_nolegend_')
     ax.set_xlabel("")
     ax.legend().remove()
@@ -362,7 +362,7 @@ def violin(ax, frame, base, new, workload, config):
     ax.vlines(vlines, 0, 1,  transform=ax.get_xaxis_transform())
 
     ax.xaxis.set_major_locator(ticker.FixedLocator([2,6,10,14,18]))
-    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_bs(x, map_config_axis_names(config['subplotx'])) for x in sp]))
+    ax.xaxis.set_major_formatter(ticker.FixedFormatter([format_label(x, map_config_axis_names(config['subplotx'])) for x in sp]))
     ax.set_xlabel("")
     ax.set_axisbelow(True)
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
