@@ -412,7 +412,7 @@ def null_cli(path_a, path_b, name_a, name_b, out_path, out_name, config):
     frame = append_single(frame, path_a, name_a)
     frame = append_single(frame, path_b, name_b)
 
-    plot_rnull(frame, 'relative_diff', config, base = name_a, new=name_b, title=r"Throughput (Bare Metal)")
+    plot_rnull(frame, 'relative_diff', config, base = name_a, new=name_b, title=r"Throughput ($\frac{B-A}{A}$ Bare Metal)")
     plt.savefig(f'{out_path}/{out_name}.svg')
     plot_null_violin(frame, config, name_a, name_b)
     plt.savefig(f'{out_path}/{out_name}-density.svg')
