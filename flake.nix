@@ -27,7 +27,7 @@
 
       devShells.x86_64-linux.default = pkgs.mkShell {
         inputsFrom = [ packages.x86_64-linux.default ];
-        packages = [ pythonPackages.coverage ];
+        packages = [ pythonPackages.coverage pkgs.feh ];
       };
     };
 }
